@@ -31,11 +31,36 @@ def load_config():
     return cfg, sendkey
 
 
+def _news_title(item):
+    """兼容字符串和 dict 两种新闻格式。"""
+    return item["title"] if isinstance(item, dict) else item
+
+
+def _news_source(item):
+    """获取新闻来源标识。"""
+    return item.get("source", "") if isinstance(item, dict) else ""
+
+
 def build_markdown(news, quote, date):
+    """生成 Server酱 desp 用的 Markdown 正文。
+
+    每条新闻使用 [标题](url) 语法，在微信消息详情页中可点击跳转原文。
+    没有 url 的条目回退为纯文本。
+    """
     lines = [f"# 今日简报 · {date.month}月{date.day}日", ""]
     lines.append(f"> {date.year}年{date.month}月{date.day}日 · 每天60秒知天下")
     lines.append("")
-    lines.extend(f"{i}. {text}" for i, text in enumerate(news, 1))
+
+    for i, item in enumerate(news, 1):
+        title = _news_title(item)
+        url = item.get("url", "") if isinstance(item, dict) else ""
+        source = _news_source(item)
+        source_tag = f" `{source}`" if source else ""
+        if url:
+            lines.append(f"{i}. [{title}]({url}){source_tag}")
+        else:
+            lines.append(f"{i}. {title}{source_tag}")
+
     lines.append("")
     lines.append(f"> 【每日金句】{quote}")
     lines.append("")

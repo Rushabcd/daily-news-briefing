@@ -2,11 +2,14 @@
 
 优先使用 60s API（每日 60 秒读懂世界），不足时依次从百度热搜、
 今日头条热榜、微博热搜、知乎热榜补充，最后使用内置兜底数据。
+
+返回格式：每条新闻为 dict，包含 title（标题）、url（点击跳转链接）、source（来源标识）。
 """
 
 import json
 import re
 import ssl
+import urllib.parse
 import urllib.request
 
 USER_AGENT = (
@@ -82,14 +85,31 @@ def _parse_hot(value):
     return int(match.group()) if match else 0
 
 
+def _search_url(title, engine="baidu"):
+    """为没有原始链接的标题构造搜索跳转链接。"""
+    encoded = urllib.parse.quote(title)
+    if engine == "baidu":
+        return f"https://www.baidu.com/s?wd={encoded}"
+    if engine == "weibo":
+        return f"https://s.weibo.com/weibo?q={encoded}"
+    if engine == "zhihu":
+        return f"https://www.zhihu.com/search?type=content&q={encoded}"
+    return f"https://www.baidu.com/s?wd={encoded}"
+
+
 def collect_60s():
-    """60s API：每日 60 秒读懂世界，返回约 20 条新闻和一句金句。"""
+    """60s API：每日 60 秒读懂世界，返回约 20 条新闻和一句金句。
+
+    该接口不提供单条 URL，返回的 link 为当日完整图文文章，所有新闻共用此链接。
+    """
     data = json.loads(_fetch("https://60s.viki.moe/v2/60s"))
     payload = data.get("data") or {}
     news = [_strip_number(item) for item in payload.get("news", [])]
     news = [item for item in news if item]
     quote = payload.get("tip") or FALLBACK_QUOTE
-    return news, quote
+    link = payload.get("link") or "https://60s.viki.moe"
+    items = [{"title": t, "url": link, "source": "60秒"} for t in news]
+    return items, quote
 
 
 def collect_baidu():
@@ -103,7 +123,12 @@ def collect_baidu():
         if not title:
             continue
         hot = _parse_hot(values[i]) if i < len(values) else 0
-        items.append({"title": title, "hot": hot})
+        items.append({
+            "title": title,
+            "url": _search_url(title, "baidu"),
+            "source": "百度",
+            "hot": hot,
+        })
     return items
 
 
@@ -116,8 +141,15 @@ def collect_toutiao():
     items = []
     for entry in items_raw:
         title = _clean_title(entry.get("Title") or "")
-        if title:
-            items.append({"title": title, "hot": _parse_hot(entry.get("HotValue"))})
+        if not title:
+            continue
+        url = entry.get("Url") or _search_url(title, "baidu")
+        items.append({
+            "title": title,
+            "url": url,
+            "source": "头条",
+            "hot": _parse_hot(entry.get("HotValue")),
+        })
     return items
 
 
@@ -128,8 +160,14 @@ def collect_weibo():
     items = []
     for entry in realtime:
         title = _clean_title(entry.get("word") or "")
-        if title:
-            items.append({"title": title, "hot": _parse_hot(entry.get("num"))})
+        if not title:
+            continue
+        items.append({
+            "title": title,
+            "url": _search_url(title, "weibo"),
+            "source": "微博",
+            "hot": _parse_hot(entry.get("num")),
+        })
     return items
 
 
@@ -145,16 +183,30 @@ def collect_zhihu():
     for entry in data.get("data") or []:
         target = entry.get("target") or {}
         title = _clean_title(target.get("title") or "")
-        if title:
-            items.append({"title": title, "hot": _parse_hot(entry.get("detail_text"))})
+        if not title:
+            continue
+        url = target.get("url") or _search_url(title, "zhihu")
+        # 知乎返回的 url 有时是 /question/xxx，需要补全协议和域名
+        if url.startswith("/"):
+            url = f"https://www.zhihu.com{url}"
+        items.append({
+            "title": title,
+            "url": url,
+            "source": "知乎",
+            "hot": _parse_hot(entry.get("detail_text")),
+        })
     return items
+
+
+def _title_key(text):
+    return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", text)
 
 
 def _dedupe(items):
     seen = set()
     result = []
     for item in items:
-        key = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", item["title"])
+        key = _title_key(item["title"])
         if not key or key in seen:
             continue
         duplicate = False
@@ -170,17 +222,20 @@ def _dedupe(items):
 
 
 def collect_news():
-    """返回 (新闻列表, 金句)。优先 60s API，不足时从其他平台补充。"""
-    news = []
+    """返回 (新闻列表, 金句)。优先 60s API，不足时从其他平台补充。
+
+    每条新闻为 dict：{"title": str, "url": str, "source": str}
+    """
+    items = []
     quote = FALLBACK_QUOTE
 
     try:
-        news, quote = collect_60s()
-        print(f"[采集] 60s API：{len(news)} 条")
+        items, quote = collect_60s()
+        print(f"[采集] 60s API：{len(items)} 条")
     except Exception as exc:
         print(f"[采集] 60s API 失败：{exc}")
 
-    if len(news) < TARGET_COUNT:
+    if len(items) < TARGET_COUNT:
         supplement = []
         for name, fn in [
             ("百度热搜", collect_baidu),
@@ -197,27 +252,30 @@ def collect_news():
                 print(f"[采集] {name} 失败：{exc}")
 
         supplement = _dedupe(supplement)
-        supplement.sort(key=lambda item: item["hot"], reverse=True)
-        existing_titles = {re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", n) for n in news}
+        supplement.sort(key=lambda item: item.get("hot", 0), reverse=True)
+        existing_keys = {_title_key(i["title"]) for i in items}
         for item in supplement:
-            if len(news) >= TARGET_COUNT:
+            if len(items) >= TARGET_COUNT:
                 break
-            key = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", item["title"])
-            if not key or key in existing_titles:
+            key = _title_key(item["title"])
+            if not key or key in existing_keys:
                 continue
             dup = False
-            for old in existing_titles:
+            for old in existing_keys:
                 if len(key) >= 8 and (key in old or old in key):
                     dup = True
                     break
             if dup:
                 continue
-            existing_titles.add(key)
-            news.append(item["title"])
+            existing_keys.add(key)
+            items.append(item)
 
-    if not news:
+    if not items:
         print("[采集] 所有数据源均失败，使用内置兜底数据。")
-        news = FALLBACK_NEWS[:TARGET_COUNT]
+        items = [
+            {"title": t, "url": _search_url(t, "baidu"), "source": "资讯"}
+            for t in FALLBACK_NEWS[:TARGET_COUNT]
+        ]
 
-    print(f"[采集] 最终 {len(news)} 条热点")
-    return news[:TARGET_COUNT], quote
+    print(f"[采集] 最终 {len(items)} 条热点")
+    return items[:TARGET_COUNT], quote
