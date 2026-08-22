@@ -1,64 +1,32 @@
-"""通过 Server酱（ServerChan）推送到微信。"""
+"""通过 Server酱（ServerChan）推送到微信。
 
-import json
-import os
-import time
+Server酱 API 只支持两个 POST 参数（官方文档 https://sct.ftqq.com/sendkey）：
+    title: 标题（必填，最长 32 字符，不能含换行）
+    desp:  正文，支持 Markdown；图片必须用 ![](图片URL) 语法嵌在正文里才会显示
+
+注意：不存在名为 images 的参数，单独传 images 字段会被服务端静默丢弃。
+图片 URL 必须是国内可访问的公网地址（本项目使用 jsDelivr CDN 加载仓库内长图）。
+"""
+
+import ssl
 import urllib.parse
 import urllib.request
-import ssl
 
 API_BASE = "https://sctapi.ftqq.com"
 
 
-def push(sendkey, title, desp="", images=None):
-    """发送推送，返回服务端 JSON 字符串。"""
-    data = {"title": title, "desp": desp}
-    if images:
-        data["images"] = "\n".join(images)
-    body = urllib.parse.urlencode(data).encode("utf-8")
+def push(sendkey, title, desp=""):
+    """发送推送，返回服务端 JSON 字符串。
+
+    图片请以 Markdown 语法拼进 desp，例如：
+        desp = "正文内容\\n\\n![今日简报](https://cdn.jsdelivr.net/gh/xxx/xxx.png)"
+    """
+    data = urllib.parse.urlencode({"title": title, "desp": desp}).encode("utf-8")
     req = urllib.request.Request(
         f"{API_BASE}/{sendkey}.send",
-        data=body,
+        data=data,
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     ctx = ssl.create_default_context()
     with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
         return resp.read().decode("utf-8", errors="replace")
-
-
-def upload_image_catbox(path):
-    """上传图片到 catbox.moe，返回公开 URL；失败返回 None。"""
-    try:
-        boundary = "----CodexBoundary" + str(int(time.time()))
-        with open(path, "rb") as f:
-            file_bytes = f.read()
-        filename = os.path.basename(path)
-        # 用简单 ASCII 文件名避免中文编码问题
-        safe_filename = "briefing.png"
-        parts = []
-        parts.append(
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="reqtype"\r\n\r\n'
-            f"fileupload\r\n".encode()
-        )
-        parts.append(
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="fileToUpload"; '
-            f'filename="{safe_filename}"\r\n'
-            f"Content-Type: image/png\r\n\r\n".encode()
-        )
-        parts.append(file_bytes)
-        parts.append(f"\r\n--{boundary}--\r\n".encode())
-        body = b"".join(parts)
-        req = urllib.request.Request(
-            "https://catbox.moe/user/api.php",
-            data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-        )
-        ctx = ssl.create_default_context()
-        with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
-            url = resp.read().decode("utf-8", errors="replace").strip()
-        return url if url.startswith("http") else None
-    except Exception as exc:
-        print(f"[上传] catbox.moe 失败：{exc}")
-        return None

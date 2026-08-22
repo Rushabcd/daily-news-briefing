@@ -7,7 +7,8 @@ on:
   workflow_dispatch:  # 支持手动触发
 
 permissions:
-  contents: read
+  # 需要写权限：把渲染好的长图提交进仓库，作为 jsDelivr 图床的图片源
+  contents: write
 
 jobs:
   daily-news:
@@ -30,14 +31,27 @@ jobs:
       - name: 安装依赖
         run: pip install -r requirements.txt
 
-      - name: 运行简报程序
-        run: python main.py
+      # 阶段1：采集新闻 + 渲染长图 + 生成推送正文
+      - name: 采集并渲染长图
+        run: python main.py render
+
+      # 阶段2：长图提交进仓库（jsDelivr 会通过仓库地址直接加载图片）
+      # 每天文件名不同，不存在 CDN 缓存过期问题；同时清理 7 天前的旧图防止仓库膨胀
+      - name: 提交长图到仓库（图床）
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          find outputs -name '*.png' -mtime +6 -delete 2>/dev/null || true
+          git add -A -- outputs
+          if git diff --cached --quiet; then
+            echo "图片无变化，跳过提交"
+          else
+            git commit -m "chore: add briefing image $(date -u +%F)"
+            git push
+          fi
+
+      # 阶段3：拼接 jsDelivr 长图链接，推送微信
+      - name: 推送到微信
         env:
           SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
-
-      - name: 上传生成的长图（可下载）
-        uses: actions/upload-artifact@v4
-        with:
-          name: 今日简报
-          path: outputs/*.png
-          retention-days: 7
+        run: python main.py push
